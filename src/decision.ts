@@ -7,6 +7,7 @@
  */
 
 import type { AutoResumeConfig } from "./config.ts";
+import type { GiveUpReason } from "./messages.ts";
 import { type ResetHint, parseResetHint } from "./reset-hint.ts";
 
 export type ErrorKind = "rate-limit" | "quota" | "other";
@@ -75,7 +76,7 @@ export interface DecisionInput {
 
 export type Decision =
 	| { action: "schedule"; delayMs: number; hint: ResetHint; reason: string }
-	| { action: "report"; reason: string; hint?: ResetHint }
+	| { action: "report"; reason: GiveUpReason; hint?: ResetHint }
 	| { action: "ignore"; reason: string };
 
 export function decideResume(input: DecisionInput): Decision {
@@ -90,32 +91,36 @@ export function decideResume(input: DecisionInput): Decision {
 	if (kind === "quota") {
 		return {
 			action: "report",
-			reason: "limit paket/kuota — menunggu tidak menolong",
+			reason: { code: "quota" },
 			...(hint === undefined ? {} : { hint }),
 		};
 	}
 
 	if (kind !== "rate-limit") return { action: "ignore", reason: "not a rate-limit error" };
 
-	if (!hint) return { action: "report", reason: "rate limit tanpa info kapan reset" };
+	if (!hint) return { action: "report", reason: { code: "no-hint" } };
 
 	const previous = input.lastScheduled;
 	if (previous && input.awaitingOutcome && previous.errorText === message) {
-		return { action: "report", reason: "lanjutan langsung gagal dengan error yang sama" };
+		return { action: "report", reason: { code: "same-error" } };
 	}
 	if (previous && hint.delayMs > Math.max(previous.hintMs * 2, previous.hintMs + 5000)) {
 		return {
 			action: "report",
-			reason: `hint reset makin jauh (${Math.round(previous.hintMs / 1000)}s → ${Math.round(hint.delayMs / 1000)}s)`,
+			reason: {
+				code: "growing-hint",
+				fromSeconds: Math.round(previous.hintMs / 1000),
+				toSeconds: Math.round(hint.delayMs / 1000),
+			},
 			hint,
 		};
 	}
 	if (input.config.maxWaitMs > 0 && hint.delayMs > input.config.maxWaitMs) {
-		return { action: "report", reason: "reset lebih jauh dari batas tunggu", hint };
+		return { action: "report", reason: { code: "max-wait" }, hint };
 	}
 	if (input.config.maxResumes > 0 && input.resumesDone >= input.config.maxResumes) {
-		return { action: "report", reason: `sudah ${input.resumesDone} kali resume di sesi ini`, hint };
+		return { action: "report", reason: { code: "max-resumes", count: input.resumesDone }, hint };
 	}
 
-	return { action: "schedule", delayMs: hint.delayMs, hint, reason: "rate limit dengan info reset" };
+	return { action: "schedule", delayMs: hint.delayMs, hint, reason: "rate limit with a reset hint" };
 }

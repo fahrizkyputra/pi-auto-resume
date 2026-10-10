@@ -11,10 +11,12 @@ Pi already retries transient errors three times with a short backoff. When that 
 This package reads that hint, waits until the reset, and sends a marked continuation:
 
 ```
-⚙ auto-resume (rate limit reset 14:32, menunggu 9s):
-Percobaan sebelumnya terhenti karena rate limit.
-Lanjutkan dari langkah terakhir, dan jangan ulangi tool call yang sudah berhasil.
+⚙ auto-resume (rate limit reset 14:32, waited 9s):
+The previous attempt stopped because of a rate limit.
+Continue from the last step, and do not repeat tool calls that already succeeded.
 ```
+
+English is the default. Switch to Indonesian with `/auto-resume language id`.
 
 ## Install
 
@@ -36,7 +38,7 @@ pi install npm:@fahrizkyputra/pi-auto-resume
 
 Reset hints are read from `retry-after-ms`, `retry-after`, `x-ratelimit-reset-after`, and `x-ratelimit-reset` response headers first, then from the error text: `reset after 8s`, `retry after 30 seconds`, `try again in 2 minutes`, `resets at 18:00`, ISO timestamps.
 
-While waiting, the status bar shows `⏳ limit: lanjut 14:32 (2m 10s)`, and you get a notification when the resume is scheduled and when it is sent.
+While waiting, the status bar shows `⏳ limit: resuming 14:32 (2m 10s)`, and you get a notification when the resume is scheduled and when it is sent.
 
 ## Commands
 
@@ -45,6 +47,7 @@ While waiting, the status bar shows `⏳ limit: lanjut 14:32 (2m 10s)`, and you 
 | `/auto-resume` | Status: pending resume, resumes sent in this session, config path |
 | `/auto-resume cancel` | Cancel the pending resume |
 | `/auto-resume off` / `on` | Disable or enable (persisted to the config file) |
+| `/auto-resume language en` / `id` | Language of the continuation, notifications, and status bar (persisted) |
 | `/auto-resume config` | Show the effective configuration |
 
 ## Configuration
@@ -55,12 +58,21 @@ While waiting, the status bar shows `⏳ limit: lanjut 14:32 (2m 10s)`, and you 
 {
   "enabled": true,
   "notify": true,
+  "language": "en",
   "maxWaitMs": 0,
   "maxResumes": 0,
-  "slackMs": 1500,
-  "continuationPrompt": "Percobaan sebelumnya terhenti karena rate limit.\nLanjutkan dari langkah terakhir, dan jangan ulangi tool call yang sudah berhasil."
+  "slackMs": 1500
 }
 ```
+
+`language` is `"en"` (default) or `"id"`. It sets every text the package produces: the continuation, the `⚙ auto-resume` header, notifications, and the status bar countdown.
+
+| Language | Built-in continuation |
+|---|---|
+| `en` | The previous attempt stopped because of a rate limit. Continue from the last step, and do not repeat tool calls that already succeeded. |
+| `id` | Percobaan sebelumnya terhenti karena rate limit. Lanjutkan dari langkah terakhir, dan jangan ulangi tool call yang sudah berhasil. |
+
+Add `"continuationPrompt": "..."` to replace the built-in text with your own. A custom prompt is used as-is in either language; the header still follows `language`.
 
 `maxWaitMs` and `maxResumes` default to `0`, meaning no limit: the package waits as long as the hint says. The loop guards above are what stop a pointless cycle.
 
@@ -77,6 +89,7 @@ npm install
 npm test          # node:test, no Pi required
 npm run typecheck
 npm run test:e2e  # real Pi over RPC against a local server that answers 429, then succeeds
+PI_AUTO_RESUME_LANGUAGE=id npm run test:e2e   # same check in Indonesian
 ```
 
 ## License

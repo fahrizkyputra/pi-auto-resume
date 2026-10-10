@@ -6,9 +6,11 @@
  * is testable with a fake clock and no Pi process.
  */
 
-import type { AutoResumeConfig } from "./config.ts";
+import { type AutoResumeConfig, effectivePrompt } from "./config.ts";
 import { type Decision, type LastScheduled, decideResume } from "./decision.ts";
 import {
+	type CancelReason,
+	formatCancelNotice,
 	formatContinuation,
 	formatGiveUpNotice,
 	formatResumeNotice,
@@ -84,7 +86,7 @@ export class AutoResumeController {
 			const hintAt =
 				decision.hint === undefined ? undefined : now + decision.hint.delayMs;
 			if (this.deps.config.notify) {
-				this.deps.notify(formatGiveUpNotice(decision.reason, hintAt), "warning");
+				this.deps.notify(formatGiveUpNotice(this.deps.config.language, decision.reason, hintAt), "warning");
 			}
 			this.deps.setStatus(undefined);
 			return decision;
@@ -97,10 +99,10 @@ export class AutoResumeController {
 	}
 
 	/** Cancel on human input, abort, session switch, or shutdown. */
-	cancel(reason: string, options: { silent?: boolean } = {}): boolean {
+	cancel(reason: CancelReason, options: { silent?: boolean } = {}): boolean {
 		const had = this.cancelPending();
 		if (had && !options.silent && this.deps.config.notify) {
-			this.deps.notify(`Rate limit: jadwal lanjut otomatis dibatalkan (${reason}).`, "info");
+			this.deps.notify(formatCancelNotice(this.deps.config.language, reason), "info");
 		}
 		return had;
 	}
@@ -111,7 +113,7 @@ export class AutoResumeController {
 
 	status(): string | undefined {
 		if (!this.pending) return undefined;
-		return statusText(this.pending.fireAt, this.deps.now());
+		return statusText(this.deps.config.language, this.pending.fireAt, this.deps.now());
 	}
 
 	refreshStatus(): void {
@@ -134,7 +136,7 @@ export class AutoResumeController {
 		this.pending = { fireAt, delayMs: totalDelay, hint, errorText, cancel };
 		this.refreshStatus();
 		if (this.deps.config.notify) {
-			this.deps.notify(formatScheduleNotice(fireAt, now), "info");
+			this.deps.notify(formatScheduleNotice(this.deps.config.language, fireAt, now), "info");
 		}
 	}
 
@@ -150,16 +152,12 @@ export class AutoResumeController {
 		this.lastScheduled = { errorText: pending.errorText, hintMs: pending.hint.delayMs };
 		this.deps.setStatus(undefined);
 
+		const config = this.deps.config;
 		this.deps.sendContinuation(
-			formatContinuation({
-				prompt: this.deps.config.continuationPrompt,
-				resetAt: now,
-				waitedMs,
-				now,
-			}),
+			formatContinuation({ language: config.language, prompt: effectivePrompt(config), resetAt: now, waitedMs }),
 		);
-		if (this.deps.config.notify) {
-			this.deps.notify(formatResumeNotice(waitedMs), "info");
+		if (config.notify) {
+			this.deps.notify(formatResumeNotice(config.language, waitedMs), "info");
 		}
 	}
 

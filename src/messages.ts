@@ -1,11 +1,166 @@
 /**
- * Text formatting for the resume message and the status bar.
+ * Every user-facing string, in English and Indonesian.
  *
  * The continuation is sent as an ordinary user message with a visible marker,
  * so the transcript shows that it was the package, not the human, who spoke.
+ * The marker itself is not translated: it is how the transcript is searched.
  */
 
 export const AUTO_RESUME_MARKER = "⚙ auto-resume";
+
+export type Language = "en" | "id";
+export const LANGUAGES: readonly Language[] = ["en", "id"];
+export const DEFAULT_LANGUAGE: Language = "en";
+
+const LANGUAGE_ALIASES: Record<string, Language> = {
+	en: "en",
+	eng: "en",
+	english: "en",
+	id: "id",
+	ind: "id",
+	indonesia: "id",
+	indonesian: "id",
+	bahasa: "id",
+};
+
+/** Accepts `en`, `id`, and spelled-out names; anything else is undefined. */
+export function parseLanguage(value: unknown): Language | undefined {
+	if (typeof value !== "string") return undefined;
+	return LANGUAGE_ALIASES[value.trim().toLowerCase()];
+}
+
+/** Why the package decided not to resume. Rendered per language. */
+export type GiveUpReason =
+	| { code: "quota" }
+	| { code: "no-hint" }
+	| { code: "same-error" }
+	| { code: "growing-hint"; fromSeconds: number; toSeconds: number }
+	| { code: "max-wait" }
+	| { code: "max-resumes"; count: number };
+
+export type CancelReason = "typed" | "aborted" | "command";
+
+interface Strings {
+	languageName: string;
+	defaultPrompt: string;
+	continuationHeader(resetClock: string, waited: string): string;
+	scheduleNotice(clock: string, countdown: string): string;
+	resumeNotice(waited: string): string;
+	giveUpNotice(reason: string, resetClock?: string): string;
+	giveUpReason(reason: GiveUpReason): string;
+	cancelNotice(reason: string): string;
+	cancelReason(reason: CancelReason): string;
+	status(clock: string, countdown: string): string;
+	nothingPending: string;
+	enabledNotice(enabled: boolean, path: string): string;
+	languageNotice(path: string): string;
+	unknownLanguage(value: string): string;
+	statusEnabled(enabled: boolean): string;
+	statusPending(time: string): string;
+	statusNoPending: string;
+	statusResumes(count: number): string;
+	noLimit: string;
+}
+
+const STRINGS: Record<Language, Strings> = {
+	en: {
+		languageName: "English",
+		defaultPrompt: [
+			"The previous attempt stopped because of a rate limit.",
+			"Continue from the last step, and do not repeat tool calls that already succeeded.",
+		].join("\n"),
+		continuationHeader: (resetClock, waited) => `${AUTO_RESUME_MARKER} (rate limit reset ${resetClock}, waited ${waited}):`,
+		scheduleNotice: (clock, countdown) =>
+			`Rate limit: resuming automatically at ${clock} (in ${countdown}). Type anything to cancel.`,
+		resumeNotice: (waited) => `Rate limit: continuation sent after waiting ${waited}.`,
+		giveUpNotice: (reason, resetClock) =>
+			`Rate limit: not resuming automatically (${reason}).${
+				resetClock === undefined ? "" : ` The limit resets at ${resetClock}.`
+			} Type anything to continue yourself.`,
+		giveUpReason: (reason) => {
+			switch (reason.code) {
+				case "quota":
+					return "plan/quota limit — waiting will not help";
+				case "no-hint":
+					return "rate limit without a reset time";
+				case "same-error":
+					return "the resumed run failed with the same error";
+				case "growing-hint":
+					return `reset time is getting longer (${reason.fromSeconds}s → ${reason.toSeconds}s)`;
+				case "max-wait":
+					return "reset is beyond the maximum wait";
+				case "max-resumes":
+					return `already resumed ${reason.count} times in this session`;
+			}
+		},
+		cancelNotice: (reason) => `Rate limit: automatic resume cancelled (${reason}).`,
+		cancelReason: (reason) =>
+			reason === "typed" ? "you typed" : reason === "aborted" ? "run aborted" : "requested via /auto-resume",
+		status: (clock, countdown) => `⏳ limit: resuming ${clock} (${countdown})`,
+		nothingPending: "No automatic resume is pending.",
+		enabledNotice: (enabled, path) => `Auto-resume ${enabled ? "enabled" : "disabled"} (${path}).`,
+		languageNotice: (path) => `Auto-resume language: English (${path}).`,
+		unknownLanguage: (value) => `Unknown language "${value}". Use: /auto-resume language en|id`,
+		statusEnabled: (enabled) => `enabled: ${enabled}`,
+		statusPending: (time) => `resuming automatically at ${time}`,
+		statusNoPending: "no resume pending",
+		statusResumes: (count) => `resumes sent this session: ${count}`,
+		noLimit: "0 = no limit",
+	},
+	id: {
+		languageName: "Bahasa Indonesia",
+		defaultPrompt: [
+			"Percobaan sebelumnya terhenti karena rate limit.",
+			"Lanjutkan dari langkah terakhir, dan jangan ulangi tool call yang sudah berhasil.",
+		].join("\n"),
+		continuationHeader: (resetClock, waited) =>
+			`${AUTO_RESUME_MARKER} (rate limit reset ${resetClock}, menunggu ${waited}):`,
+		scheduleNotice: (clock, countdown) =>
+			`Rate limit: mencoba lanjut otomatis pukul ${clock} (${countdown} lagi). Ketik apa pun untuk membatalkan.`,
+		resumeNotice: (waited) => `Rate limit: pesan lanjutan dikirim setelah menunggu ${waited}.`,
+		giveUpNotice: (reason, resetClock) =>
+			`Rate limit: tidak dilanjutkan otomatis (${reason}).${
+				resetClock === undefined ? "" : ` Limit disebut reset pukul ${resetClock}.`
+			} Ketik apa pun untuk melanjutkan sendiri.`,
+		giveUpReason: (reason) => {
+			switch (reason.code) {
+				case "quota":
+					return "limit paket/kuota — menunggu tidak menolong";
+				case "no-hint":
+					return "rate limit tanpa info kapan reset";
+				case "same-error":
+					return "lanjutan langsung gagal dengan error yang sama";
+				case "growing-hint":
+					return `waktu reset makin jauh (${reason.fromSeconds}s → ${reason.toSeconds}s)`;
+				case "max-wait":
+					return "reset lebih jauh dari batas tunggu";
+				case "max-resumes":
+					return `sudah ${reason.count} kali resume di sesi ini`;
+			}
+		},
+		cancelNotice: (reason) => `Rate limit: jadwal lanjut otomatis dibatalkan (${reason}).`,
+		cancelReason: (reason) =>
+			reason === "typed" ? "kamu mengetik" : reason === "aborted" ? "run dibatalkan" : "diminta lewat /auto-resume",
+		status: (clock, countdown) => `⏳ limit: lanjut ${clock} (${countdown})`,
+		nothingPending: "Tidak ada jadwal lanjut otomatis yang menunggu.",
+		enabledNotice: (enabled, path) => `Auto-resume ${enabled ? "aktif" : "nonaktif"} (${path}).`,
+		languageNotice: (path) => `Bahasa auto-resume: Bahasa Indonesia (${path}).`,
+		unknownLanguage: (value) => `Bahasa "${value}" tidak dikenal. Pakai: /auto-resume language en|id`,
+		statusEnabled: (enabled) => `aktif: ${enabled}`,
+		statusPending: (time) => `lanjut otomatis pukul ${time}`,
+		statusNoPending: "tidak ada jadwal yang menunggu",
+		statusResumes: (count) => `resume terkirim di sesi ini: ${count}`,
+		noLimit: "0 = tanpa batas",
+	},
+};
+
+export function strings(language: Language): Strings {
+	return STRINGS[language];
+}
+
+export function defaultPrompt(language: Language): string {
+	return STRINGS[language].defaultPrompt;
+}
 
 export function formatClock(timestamp: number): string {
 	const date = new Date(timestamp);
@@ -23,37 +178,37 @@ export function formatCountdown(ms: number): string {
 	return restMinutes === 0 ? `${hours}h` : `${hours}h ${restMinutes}m`;
 }
 
-export function formatWaited(ms: number): string {
-	return formatCountdown(ms);
-}
-
 export interface ContinuationInput {
+	language: Language;
 	prompt: string;
 	resetAt: number;
 	waitedMs: number;
-	now: number;
 }
 
-/** `⚙ auto-resume (rate limit reset 14:32, menunggu 12s): <prompt>` */
+/** `⚙ auto-resume (rate limit reset 14:32, waited 12s):\n<prompt>` */
 export function formatContinuation(input: ContinuationInput): string {
-	const resetText = formatClock(input.resetAt);
-	const waitedText = formatWaited(input.waitedMs);
-	return `${AUTO_RESUME_MARKER} (rate limit reset ${resetText}, menunggu ${waitedText}):\n${input.prompt}`;
+	const header = STRINGS[input.language].continuationHeader(formatClock(input.resetAt), formatCountdown(input.waitedMs));
+	return `${header}\n${input.prompt}`;
 }
 
-export function formatScheduleNotice(fireAt: number, now: number): string {
-	return `Rate limit: mencoba lanjut otomatis pukul ${formatClock(fireAt)} (${formatCountdown(fireAt - now)} lagi). Ketik apa pun untuk membatalkan.`;
+export function formatScheduleNotice(language: Language, fireAt: number, now: number): string {
+	return STRINGS[language].scheduleNotice(formatClock(fireAt), formatCountdown(fireAt - now));
 }
 
-export function formatResumeNotice(waitedMs: number): string {
-	return `Rate limit: pesan lanjutan dikirim setelah menunggu ${formatWaited(waitedMs)}.`;
+export function formatResumeNotice(language: Language, waitedMs: number): string {
+	return STRINGS[language].resumeNotice(formatCountdown(waitedMs));
 }
 
-export function formatGiveUpNotice(reason: string, hintAt?: number): string {
-	const when = hintAt === undefined ? "" : ` Limit disebut reset pukul ${formatClock(hintAt)}.`;
-	return `Rate limit: tidak dilanjutkan otomatis (${reason}).${when} Ketik apa pun untuk melanjutkan sendiri.`;
+export function formatGiveUpNotice(language: Language, reason: GiveUpReason, resetAt?: number): string {
+	const text = STRINGS[language];
+	return text.giveUpNotice(text.giveUpReason(reason), resetAt === undefined ? undefined : formatClock(resetAt));
 }
 
-export function statusText(fireAt: number, now: number): string {
-	return `⏳ limit: lanjut ${formatClock(fireAt)} (${formatCountdown(fireAt - now)})`;
+export function formatCancelNotice(language: Language, reason: CancelReason): string {
+	const text = STRINGS[language];
+	return text.cancelNotice(text.cancelReason(reason));
+}
+
+export function statusText(language: Language, fireAt: number, now: number): string {
+	return STRINGS[language].status(formatClock(fireAt), formatCountdown(fireAt - now));
 }

@@ -22,6 +22,12 @@ import { fileURLToPath } from "node:url";
 const TIMEOUT_MS = 90_000;
 const FAILING_REQUESTS = 2; // initial request + Pi's single retry
 const SUCCESS_TEXT = "resumed ok after the limit";
+// PI_AUTO_RESUME_LANGUAGE=id runs the same check with Indonesian text.
+const LANGUAGE = process.env.PI_AUTO_RESUME_LANGUAGE ?? "en";
+const EXPECT = {
+	en: { prompt: /do not repeat tool calls that already succeeded/, header: /, waited \d+s\):/, notice: /resuming automatically at/ },
+	id: { prompt: /jangan ulangi tool call yang sudah berhasil/, header: /, menunggu \d+s\):/, notice: /mencoba lanjut otomatis/ },
+}[LANGUAGE];
 
 const extensionSpec =
 	process.env.PI_AUTO_RESUME_EXTENSION ??
@@ -34,7 +40,10 @@ for (const dir of [agentDir, workDir]) mkdirSync(dir, { recursive: true });
 
 // Pi's built-in retry: one quick attempt, so the run settles fast.
 writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ retry: { maxRetries: 1, baseDelayMs: 200 } }));
-writeFileSync(join(agentDir, "auto-resume.json"), JSON.stringify({ slackMs: 200 }));
+writeFileSync(
+	join(agentDir, "auto-resume.json"),
+	JSON.stringify(LANGUAGE === "en" ? { slackMs: 200 } : { slackMs: 200, language: LANGUAGE }),
+);
 
 let requests = 0;
 const server = createServer((request, response) => {
@@ -158,11 +167,11 @@ function handle(line) {
 function check() {
 	if (extensionErrors.length > 0) return fail(`extension error: ${extensionErrors[0]}`);
 	if (!resumeMessage) return fail("no auto-resume message was sent");
-	if (!/jangan ulangi tool call yang sudah berhasil/.test(resumeMessage)) {
-		return fail(`unexpected continuation text: ${resumeMessage}`);
+	if (!EXPECT.prompt.test(resumeMessage) || !EXPECT.header.test(resumeMessage)) {
+		return fail(`unexpected ${LANGUAGE} continuation text: ${resumeMessage}`);
 	}
 	if (!successAfterResume) return fail("the stub's success answer never followed the resume");
-	if (!notices.some((notice) => /mencoba lanjut otomatis/.test(notice))) {
+	if (!notices.some((notice) => EXPECT.notice.test(notice))) {
 		return fail(`no schedule notification, got: ${notices.join(" | ")}`);
 	}
 	// Idle cache warming can add requests later, so only a lower bound is meaningful.
@@ -184,7 +193,7 @@ function finish(code) {
 	server.close();
 	rmSync(root, { recursive: true, force: true });
 	if (code === 0) {
-		console.log(`e2e ok: 429 → Pi gave up → auto-resume sent → stub answered (${requests} requests)`);
+		console.log(`e2e ok [${LANGUAGE}]: 429 → Pi gave up → auto-resume sent → stub answered (${requests} requests)`);
 	}
 	process.exit(code);
 }

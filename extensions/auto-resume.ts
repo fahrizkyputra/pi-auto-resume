@@ -8,8 +8,9 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type AutoResumeConfig, configFilePath, readConfig, writeConfig } from "../src/config.ts";
+import { type AutoResumeConfig, configFilePath, effectivePrompt, readConfig, writeConfig } from "../src/config.ts";
 import { AutoResumeController, type AutoResumeDeps } from "../src/controller.ts";
+import { LANGUAGES, parseLanguage, strings } from "../src/messages.ts";
 
 const STATUS_KEY = "auto-resume";
 const STATUS_REFRESH_MS = 5000;
@@ -101,7 +102,7 @@ export default function autoResumeExtension(pi: ExtensionAPI) {
 		const instance = controller ?? makeController(ctx);
 		if (event.aborted) {
 			// Esc is a human decision: never resume an aborted run.
-			instance.cancel("run dibatalkan", { silent: true });
+			instance.cancel("aborted", { silent: true });
 			clearStatusTimer();
 			return;
 		}
@@ -113,7 +114,7 @@ export default function autoResumeExtension(pi: ExtensionAPI) {
 	pi.on("input", (event, ctx) => {
 		void ctx;
 		if (event.source === "extension") return;
-		controller?.cancel("kamu mengetik");
+		controller?.cancel("typed");
 		clearStatusTimer();
 	});
 
@@ -124,19 +125,21 @@ export default function autoResumeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("auto-resume", {
-		description: "Show, cancel, or toggle automatic resume after a rate limit",
+		description: "Show, cancel, toggle, or change the language of automatic resume after a rate limit",
 		getArgumentCompletions: (prefix) => {
-			const options = ["status", "cancel", "on", "off", "config"];
+			const options = ["status", "cancel", "on", "off", "config", ...LANGUAGES.map((code) => `language ${code}`)];
 			const filtered = options.filter((option) => option.startsWith(prefix));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
 		},
 		handler: async (args, ctx) => {
-			const action = args.trim().toLowerCase() || "status";
+			const [rawAction = "", ...rest] = args.trim().split(/\s+/);
+			const action = rawAction.toLowerCase() || "status";
 			const instance = controller ?? makeController(ctx);
+			const text = () => strings(config.language);
 
 			if (action === "cancel") {
-				const had = instance.cancel("diminta lewat /auto-resume");
-				if (!had) ctx.ui.notify("Tidak ada jadwal lanjut otomatis yang menunggu.", "info");
+				const had = instance.cancel("command");
+				if (!had) ctx.ui.notify(text().nothingPending, "info");
 				clearStatusTimer();
 				return;
 			}
@@ -144,10 +147,21 @@ export default function autoResumeExtension(pi: ExtensionAPI) {
 			if (action === "on" || action === "off") {
 				config = { ...config, enabled: action === "on" };
 				writeConfig(config);
-				ctx.ui.notify(
-					`Auto-resume ${config.enabled ? "aktif" : "nonaktif"} (${configFilePath()}).`,
-					"info",
-				);
+				ctx.ui.notify(text().enabledNotice(config.enabled, configFilePath()), "info");
+				return;
+			}
+
+			if (action === "language" || action === "lang" || action === "bahasa") {
+				const requested = rest.join(" ");
+				const language = parseLanguage(requested);
+				if (!language) {
+					ctx.ui.notify(text().unknownLanguage(requested || "(empty)"), "warning");
+					return;
+				}
+				config = { ...config, language };
+				writeConfig(config);
+				instance.refreshStatus();
+				ctx.ui.notify(text().languageNotice(configFilePath()), "info");
 				return;
 			}
 
@@ -157,11 +171,12 @@ export default function autoResumeExtension(pi: ExtensionAPI) {
 						`file: ${configFilePath()}`,
 						`enabled: ${config.enabled}`,
 						`notify: ${config.notify}`,
-						`maxWaitMs: ${config.maxWaitMs} (0 = tanpa batas)`,
-						`maxResumes: ${config.maxResumes} (0 = tanpa batas)`,
+						`language: ${config.language} (${text().languageName})`,
+						`maxWaitMs: ${config.maxWaitMs} (${text().noLimit})`,
+						`maxResumes: ${config.maxResumes} (${text().noLimit})`,
 						`slackMs: ${config.slackMs}`,
-						"continuationPrompt:",
-						config.continuationPrompt,
+						`continuationPrompt${config.continuationPrompt === undefined ? " (default)" : ""}:`,
+						effectivePrompt(config),
 					].join("\n"),
 					"info",
 				);
@@ -170,11 +185,12 @@ export default function autoResumeExtension(pi: ExtensionAPI) {
 
 			const fireAt = instance.pendingFireAt();
 			const lines = [
-				`enabled: ${config.enabled}`,
+				text().statusEnabled(config.enabled),
+				`language: ${config.language}`,
 				fireAt === undefined
-					? "tidak ada jadwal yang menunggu"
-					: `lanjut otomatis pukul ${new Date(fireAt).toTimeString().slice(0, 8)}`,
-				`resume terkirim di sesi ini: ${instance.resumesSent()}`,
+					? text().statusNoPending
+					: text().statusPending(new Date(fireAt).toTimeString().slice(0, 8)),
+				text().statusResumes(instance.resumesSent()),
 				`config: ${configFilePath()}`,
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
