@@ -142,3 +142,28 @@ test("/auto-resume off disables, and shutdown cancels", async () => {
 	await sleep(1200);
 	assert.deepEqual(sent, []);
 });
+
+test("/auto-resume language switches the continuation language and persists it", async () => {
+	const { pi, ctx, emit, commands, sent, notices } = fakePi();
+	autoResumeExtension(pi);
+	await emit("session_start", { reason: "startup" });
+
+	await commands["auto-resume"]!.handler("language id", ctx);
+	assert.match(notices.at(-1) ?? "", /Bahasa auto-resume: Bahasa Indonesia/);
+
+	await emit("message_end", { message: errorMessage("rate limit (reset after 0s)") });
+	await emit("agent_settled", { aborted: false });
+	await sleep(200);
+	assert.match(sent.at(-1) ?? "", /menunggu .*\n.*jangan ulangi tool call/s);
+
+	await commands["auto-resume"]!.handler("language fr", ctx);
+	assert.match(notices.at(-1) ?? "", /tidak dikenal/);
+
+	await commands["auto-resume"]!.handler("language english", ctx);
+	assert.match(notices.at(-1) ?? "", /Auto-resume language: English/);
+	await emit("session_start", { reason: "reload" });
+	await emit("message_end", { message: errorMessage("rate limit (reset after 0s)") });
+	await emit("agent_settled", { aborted: false });
+	await sleep(200);
+	assert.match(sent.at(-1) ?? "", /waited .*\n.*do not repeat tool calls/s, "persisted across a reload");
+});
