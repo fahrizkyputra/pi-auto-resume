@@ -29,14 +29,28 @@ pi install npm:@fahrizkyputra/pi-auto-resume
 | Situation | What happens |
 |---|---|
 | Rate limit (429, `rate_limit_error`, "too many requests", "overloaded") **with** a reset hint, after Pi's own retries gave up | Waits for the reset (+1.5s slack), then sends the continuation |
-| Rate limit **without** a reset hint | Stops and tells you — it does not guess |
-| Quota / plan / billing limits (`insufficient_quota`, "usage limit", "out of budget", `MODEL_NOT_IN_PLAN`) | Reports only; waiting does not fix those |
+| **Plan window** (5-hour or weekly): `Usage limit reached for 5 hour. Your limit will reset at 2026-08-12 17:11:22` | Waits until that real end, however long, then continues. A wait over 6 hours gets one extra notice with the day and time |
+| Failure **with no time at all**: a rate limit that says nothing about when, or a network/stream failure (`Stream ended without finish_reason`, `terminated`, `Connection error`, `fetch failed`, `upstream connection lost`) | Retries on a growing pause, 30s, 1m, 2m, 5m, then stops and reports |
+| Money and credential problems (`Insufficient Balance`, `insufficient_quota`, billing, subscription, a monthly limit, `MODEL_NOT_IN_PLAN`, an expired token) | Reports only; waiting does not fix those |
 | The resumed run immediately fails with the same error | Stops and reports: waiting did not help |
 | The next reset hint is much further away (8s → 20m → 3h) | Stops and reports: the limit is getting worse |
 | You type anything, press Esc, or switch session | The scheduled resume is cancelled |
 | Pi is closed while waiting | The schedule is gone (nothing persists) |
 
-Reset hints are read from `retry-after-ms`, `retry-after`, `x-ratelimit-reset-after`, and `x-ratelimit-reset` response headers first, then from the error text: `reset after 8s`, `retry after 30 seconds`, `try again in 2 minutes`, `resets at 18:00`, ISO timestamps.
+### Which time wins
+
+9router (and some providers) put **two** times in one message:
+
+```
+Usage limit reached for 5 hour. Your limit will reset at 2026-08-12 17:11:22   ← the window really ends here
+(reset after 2s)                                                                ← the gateway's own pause between retries
+```
+
+The `(reset after 2s)` is only how long the gateway waits before its own next try. Following it would resume 12 hours too early and fail again. So the order is: **a stated end of a plan window first**, then response headers (`retry-after-ms`, `retry-after`, `x-ratelimit-reset-after`, `x-ratelimit-reset`), then the other text hints (`reset after 8s`, `1m 4s`, `1h 2m 3s`, `try again in 2 minutes`, `resets at 18:00`). The gateway's pause is still used for ordinary rate limits, where it is the right wait.
+
+A time written without a zone (`2026-08-12 17:11:22`) is read as **Beijing time (UTC+8)**: that is how Z.ai (GLM) writes it, and in 32 of 32 such errors in real sessions it was the only reading that made sense for a 5-hour window (read as UTC, none did). If a provider of yours writes another zone, set `zonelessOffsetHours`. A time written to the second counts as the end of that second, so the resume never lands just before the limit lifts. Times with an explicit zone (`Z`, `+07:00`, `UTC`) are always taken as written.
+
+Waits of hours or days are safe: the timer checks the wall clock every 15 seconds, so a laptop that slept resumes on time and there is no 24.8-day limit of a plain timer.
 
 While waiting, the status bar shows `⏳ limit: resuming 14:32 (2m 10s)`, and you get a notification when the resume is scheduled and when it is sent.
 
@@ -61,7 +75,9 @@ While waiting, the status bar shows `⏳ limit: resuming 14:32 (2m 10s)`, and yo
   "language": "en",
   "maxWaitMs": 0,
   "maxResumes": 0,
-  "slackMs": 1500
+  "slackMs": 1500,
+  "backoffMs": [30000, 60000, 120000, 300000],
+  "zonelessOffsetHours": 8
 }
 ```
 
@@ -74,7 +90,9 @@ While waiting, the status bar shows `⏳ limit: resuming 14:32 (2m 10s)`, and yo
 
 Add `"continuationPrompt": "..."` to replace the built-in text with your own. A custom prompt is used as-is in either language; the header still follows `language`.
 
-`maxWaitMs` and `maxResumes` default to `0`, meaning no limit: the package waits as long as the hint says. The loop guards above are what stop a pointless cycle.
+`maxWaitMs` and `maxResumes` default to `0`, meaning no limit: the package waits as long as the hint says, including until a weekly limit resets. Set `maxWaitMs` (for example `21600000` for 6 hours) if you would rather be told than wait that long. The loop guards above are what stop a pointless cycle.
+
+`backoffMs` is the list of pauses for failures that carry no time, one per retry; when it runs out, the package reports. It restarts after any run that ends cleanly. `zonelessOffsetHours` is the UTC offset used for times written without a zone.
 
 ## Notes
 

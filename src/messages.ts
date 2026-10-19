@@ -36,7 +36,8 @@ export type GiveUpReason =
 	| { code: "same-error" }
 	| { code: "growing-hint"; fromSeconds: number; toSeconds: number }
 	| { code: "max-wait" }
-	| { code: "max-resumes"; count: number };
+	| { code: "max-resumes"; count: number }
+	| { code: "retries-exhausted"; attempts: number };
 
 export type CancelReason = "typed" | "aborted" | "command";
 
@@ -45,6 +46,9 @@ interface Strings {
 	defaultPrompt: string;
 	continuationHeader(resetClock: string, waited: string): string;
 	scheduleNotice(clock: string, countdown: string): string;
+	windowNotice(clock: string, countdown: string): string;
+	longWaitNotice(clock: string, countdown: string): string;
+	backoffNotice(clock: string, countdown: string, attempt: number, total: number): string;
 	resumeNotice(waited: string): string;
 	giveUpNotice(reason: string, resetClock?: string): string;
 	giveUpReason(reason: GiveUpReason): string;
@@ -72,6 +76,12 @@ const STRINGS: Record<Language, Strings> = {
 		continuationHeader: (resetClock, waited) => `${AUTO_RESUME_MARKER} (rate limit reset ${resetClock}, waited ${waited}):`,
 		scheduleNotice: (clock, countdown) =>
 			`Rate limit: resuming automatically at ${clock} (in ${countdown}). Type anything to cancel.`,
+		windowNotice: (clock, countdown) =>
+			`Usage limit: the plan window ends at ${clock} (in ${countdown}). Resuming automatically then. Type anything to cancel.`,
+		longWaitNotice: (clock, countdown) =>
+			`This is a long wait: resuming at ${clock} (in ${countdown}). Keep this Pi session open until then, or type anything to cancel and continue yourself.`,
+		backoffNotice: (clock, countdown, attempt, total) =>
+			`Temporary failure with no reset time: retry ${attempt} of ${total} at ${clock} (in ${countdown}). Type anything to cancel.`,
 		resumeNotice: (waited) => `Rate limit: continuation sent after waiting ${waited}.`,
 		giveUpNotice: (reason, resetClock) =>
 			`Rate limit: not resuming automatically (${reason}).${
@@ -91,6 +101,8 @@ const STRINGS: Record<Language, Strings> = {
 					return "reset is beyond the maximum wait";
 				case "max-resumes":
 					return `already resumed ${reason.count} times in this session`;
+				case "retries-exhausted":
+					return `still failing after ${reason.attempts} automatic retries`;
 			}
 		},
 		cancelNotice: (reason) => `Rate limit: automatic resume cancelled (${reason}).`,
@@ -117,6 +129,12 @@ const STRINGS: Record<Language, Strings> = {
 			`${AUTO_RESUME_MARKER} (rate limit reset ${resetClock}, menunggu ${waited}):`,
 		scheduleNotice: (clock, countdown) =>
 			`Rate limit: mencoba lanjut otomatis pukul ${clock} (${countdown} lagi). Ketik apa pun untuk membatalkan.`,
+		windowNotice: (clock, countdown) =>
+			`Limit pemakaian: jendela paket berakhir pukul ${clock} (${countdown} lagi). Lanjut otomatis saat itu. Ketik apa pun untuk membatalkan.`,
+		longWaitNotice: (clock, countdown) =>
+			`Tunggunya lama: lanjut pukul ${clock} (${countdown} lagi). Biarkan sesi Pi ini tetap terbuka sampai saat itu, atau ketik apa pun untuk membatalkan dan lanjut sendiri.`,
+		backoffNotice: (clock, countdown, attempt, total) =>
+			`Gangguan sementara tanpa info reset: coba ulang ke-${attempt} dari ${total} pukul ${clock} (${countdown} lagi). Ketik apa pun untuk membatalkan.`,
 		resumeNotice: (waited) => `Rate limit: pesan lanjutan dikirim setelah menunggu ${waited}.`,
 		giveUpNotice: (reason, resetClock) =>
 			`Rate limit: tidak dilanjutkan otomatis (${reason}).${
@@ -136,6 +154,8 @@ const STRINGS: Record<Language, Strings> = {
 					return "reset lebih jauh dari batas tunggu";
 				case "max-resumes":
 					return `sudah ${reason.count} kali resume di sesi ini`;
+				case "retries-exhausted":
+					return `masih gagal setelah ${reason.attempts} kali coba ulang otomatis`;
 			}
 		},
 		cancelNotice: (reason) => `Rate limit: jadwal lanjut otomatis dibatalkan (${reason}).`,
@@ -193,6 +213,39 @@ export function formatContinuation(input: ContinuationInput): string {
 
 export function formatScheduleNotice(language: Language, fireAt: number, now: number): string {
 	return STRINGS[language].scheduleNotice(formatClock(fireAt), formatCountdown(fireAt - now));
+}
+
+/** Waits longer than this get one extra notice, so a multi-day wait is never a surprise. */
+export const LONG_WAIT_MS = 6 * 60 * 60 * 1000;
+
+export type ScheduleKind = "rate-limit-hint" | "window-reset" | "backoff";
+
+export function formatScheduleNoticeFor(
+	language: Language,
+	kind: ScheduleKind,
+	fireAt: number,
+	now: number,
+	attempt?: { number: number; total: number },
+): string {
+	const text = STRINGS[language];
+	const clock = formatClock(fireAt);
+	const countdown = formatCountdown(fireAt - now);
+	if (kind === "backoff" && attempt) return text.backoffNotice(clock, countdown, attempt.number, attempt.total);
+	if (kind === "window-reset") return text.windowNotice(clock, countdown);
+	return text.scheduleNotice(clock, countdown);
+}
+
+export function formatLongWaitNotice(language: Language, fireAt: number, now: number): string {
+	return STRINGS[language].longWaitNotice(formatClockWithDay(fireAt, now), formatCountdown(fireAt - now));
+}
+
+/** `18:30`, or `Fri 18:30` when it is not today, so a wait of days names its day. */
+export function formatClockWithDay(timestamp: number, now: number): string {
+	const date = new Date(timestamp);
+	const sameDay = date.toDateString() === new Date(now).toDateString();
+	if (sameDay) return formatClock(timestamp);
+	const day = date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+	return `${day} ${formatClock(timestamp)}`;
 }
 
 export function formatResumeNotice(language: Language, waitedMs: number): string {

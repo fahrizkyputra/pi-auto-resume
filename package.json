@@ -1,7 +1,7 @@
 {
   "name": "@fahrizkyputra/pi-auto-resume",
-  "version": "0.2.0",
-  "description": "Resume a Pi session automatically after a rate limit: reads the reset hint, waits, then sends a marked continuation — no human \"continue\" needed.",
+  "version": "0.3.0",
+  "description": "Resume a Pi session automatically after a rate limit: reads the reset hint, waits, then sends a marked continuation. Also waits out 5-hour and weekly plan windows by their real end time, and retries dropped streams and timeless failures on a backoff.",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -36,7 +36,7 @@
   "scripts": {
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "node scripts/e2e-rpc.mjs"
+    "test:e2e": "node scripts/e2e-rpc.mjs && node scripts/e2e-window.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

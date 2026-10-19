@@ -29,7 +29,16 @@ export interface AutoResumeConfig {
 	maxResumes: number;
 	/** Extra delay on top of the reset hint, so the limit has certainly lifted. */
 	slackMs: number;
+	/**
+	 * Pauses between retries of an error that carries no time ("Stream ended without finish_reason",
+	 * a rate limit that says nothing about when). One entry per retry; after the last, it reports.
+	 */
+	backoffMs: number[];
+	/** Offset from UTC, in hours, of times written without a zone. 8 = Beijing, where Z.ai/GLM writes them. */
+	zonelessOffsetHours: number;
 }
+
+export const DEFAULT_BACKOFF_MS: readonly number[] = [30_000, 60_000, 120_000, 300_000];
 
 /**
  * 0.1.0 wrote its Indonesian default into the file on `/auto-resume on|off`.
@@ -47,6 +56,8 @@ export const DEFAULT_CONFIG: AutoResumeConfig = {
 	maxWaitMs: 0,
 	maxResumes: 0,
 	slackMs: 1500,
+	backoffMs: [...DEFAULT_BACKOFF_MS],
+	zonelessOffsetHours: 8,
 };
 
 export function agentDir(): string {
@@ -58,18 +69,25 @@ export function configFilePath(agentDirectory: string = agentDir()): string {
 	return join(agentDirectory, CONFIG_FILE_NAME);
 }
 
+function defaults(): AutoResumeConfig {
+	const config: AutoResumeConfig = { ...DEFAULT_CONFIG, backoffMs: [...DEFAULT_BACKOFF_MS] };
+	const fromEnvironment = toBackoff(backoffFromEnvironment());
+	if (fromEnvironment !== undefined) config.backoffMs = fromEnvironment;
+	return config;
+}
+
 export function parseConfig(raw: string | undefined): AutoResumeConfig {
-	if (!raw || raw.trim().length === 0) return { ...DEFAULT_CONFIG };
+	if (!raw || raw.trim().length === 0) return defaults();
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
 	} catch {
-		return { ...DEFAULT_CONFIG };
+		return defaults();
 	}
-	if (parsed === null || typeof parsed !== "object") return { ...DEFAULT_CONFIG };
+	if (parsed === null || typeof parsed !== "object") return defaults();
 	const record = parsed as Record<string, unknown>;
 
-	const config: AutoResumeConfig = { ...DEFAULT_CONFIG };
+	const config: AutoResumeConfig = defaults();
 	if (typeof record.enabled === "boolean") config.enabled = record.enabled;
 	if (typeof record.notify === "boolean") config.notify = record.notify;
 	const language = parseLanguage(record.language);
@@ -87,15 +105,33 @@ export function parseConfig(raw: string | undefined): AutoResumeConfig {
 	if (maxResumes !== undefined) config.maxResumes = maxResumes;
 	const slackMs = toNonNegativeNumber(record.slackMs);
 	if (slackMs !== undefined) config.slackMs = slackMs;
+	const backoff = toBackoff(record.backoffMs) ?? toBackoff(backoffFromEnvironment());
+	if (backoff !== undefined) config.backoffMs = backoff;
+	if (typeof record.zonelessOffsetHours === "number" && Number.isFinite(record.zonelessOffsetHours) && Math.abs(record.zonelessOffsetHours) <= 14) {
+		config.zonelessOffsetHours = record.zonelessOffsetHours;
+	}
 	return config;
+}
+
+/** `PI_AUTO_RESUME_BACKOFF_MS=1500,2500` lets a test shorten the ladder without touching the config file. */
+function backoffFromEnvironment(): unknown {
+	const raw = process.env.PI_AUTO_RESUME_BACKOFF_MS?.trim();
+	return raw ? raw.split(",").map((part) => Number(part.trim())) : undefined;
+}
+
+/** A non-empty list of positive delays; anything else is ignored. An empty list would disable retries, which `enabled: false` already does. */
+function toBackoff(value: unknown): number[] | undefined {
+	if (!Array.isArray(value) || value.length === 0 || value.length > 20) return undefined;
+	const steps = value.map((item) => (typeof item === "number" && Number.isFinite(item) && item > 0 ? Math.round(item) : Number.NaN));
+	return steps.some(Number.isNaN) ? undefined : steps;
 }
 
 export function readConfig(path: string = configFilePath()): AutoResumeConfig {
 	try {
-		if (!existsSync(path)) return { ...DEFAULT_CONFIG };
+		if (!existsSync(path)) return parseConfig(undefined);
 		return parseConfig(readFileSync(path, "utf8"));
 	} catch {
-		return { ...DEFAULT_CONFIG };
+		return parseConfig(undefined);
 	}
 }
 

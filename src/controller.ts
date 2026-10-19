@@ -7,14 +7,16 @@
  */
 
 import { type AutoResumeConfig, effectivePrompt } from "./config.ts";
-import { type Decision, type LastScheduled, decideResume } from "./decision.ts";
+import { type Decision, type LastScheduled, type ScheduleReason, decideResume } from "./decision.ts";
 import {
 	type CancelReason,
 	formatCancelNotice,
 	formatContinuation,
+	LONG_WAIT_MS,
 	formatGiveUpNotice,
+	formatLongWaitNotice,
 	formatResumeNotice,
-	formatScheduleNotice,
+	formatScheduleNoticeFor,
 	statusText,
 } from "./messages.ts";
 import type { ResetHint } from "./reset-hint.ts";
@@ -35,6 +37,7 @@ interface PendingSchedule {
 	delayMs: number;
 	hint: ResetHint;
 	errorText: string;
+	reason: ScheduleReason;
 	cancel: () => void;
 }
 
@@ -50,6 +53,8 @@ export class AutoResumeController {
 	private resumesDone = 0;
 	private awaitingOutcome = false;
 	private lastHeaders: Record<string, string> | undefined;
+	/** Retries in a row of errors that carry no time; a clean run resets it. */
+	private backoffAttempts = 0;
 
 	constructor(deps: AutoResumeDeps) {
 		this.deps = deps;
@@ -63,6 +68,7 @@ export class AutoResumeController {
 	/** The provider response that followed: clear the header hint again. */
 	noteNoError(): void {
 		this.awaitingOutcome = false;
+		this.backoffAttempts = 0;
 	}
 
 	/** Called when the agent stopped and nothing else will continue it. */
@@ -77,12 +83,14 @@ export class AutoResumeController {
 			...(this.lastScheduled === undefined ? {} : { lastScheduled: this.lastScheduled }),
 			awaitingOutcome: this.awaitingOutcome,
 			resumesDone: this.resumesDone,
+			backoffAttempts: this.backoffAttempts,
 		});
 
 		if (decision.action === "ignore") return decision;
 
 		if (decision.action === "report") {
 			this.cancelPending();
+			this.backoffAttempts = 0;
 			const hintAt =
 				decision.hint === undefined ? undefined : now + decision.hint.delayMs;
 			if (this.deps.config.notify) {
@@ -94,7 +102,9 @@ export class AutoResumeController {
 
 		// A newer error replaces any schedule still waiting: the last decision wins.
 		this.cancelPending();
-		this.schedule(decision.delayMs, decision.hint, input.errorMessage ?? "", now);
+		if (decision.reason === "backoff") this.backoffAttempts = decision.attempt ?? this.backoffAttempts + 1;
+		else this.backoffAttempts = 0;
+		this.schedule(decision.delayMs, decision.hint, input.errorMessage ?? "", now, decision.reason, decision.attempt, decision.attempts);
 		return decision;
 	}
 
@@ -128,15 +138,29 @@ export class AutoResumeController {
 		return this.resumesDone;
 	}
 
-	private schedule(delayMs: number, hint: ResetHint, errorText: string, now: number): void {
+	private schedule(
+		delayMs: number,
+		hint: ResetHint,
+		errorText: string,
+		now: number,
+		reason: ScheduleReason,
+		attempt?: number,
+		attempts?: number,
+	): void {
 		const slack = this.deps.config.slackMs;
 		const totalDelay = delayMs + slack;
 		const fireAt = now + totalDelay;
 		const cancel = this.deps.setTimer(totalDelay, () => this.fire());
-		this.pending = { fireAt, delayMs: totalDelay, hint, errorText, cancel };
+		this.pending = { fireAt, delayMs: totalDelay, hint, errorText, reason, cancel };
 		this.refreshStatus();
 		if (this.deps.config.notify) {
-			this.deps.notify(formatScheduleNotice(this.deps.config.language, fireAt, now), "info");
+			const language = this.deps.config.language;
+			this.deps.notify(
+				formatScheduleNoticeFor(language, reason, fireAt, now, attempt === undefined ? undefined : { number: attempt, total: attempts ?? attempt }),
+				"info",
+			);
+			// One extra, plain notice for a wait of many hours, so a days-long wait is never a surprise.
+			if (totalDelay > LONG_WAIT_MS) this.deps.notify(formatLongWaitNotice(language, fireAt, now), "warning");
 		}
 	}
 
@@ -149,7 +173,9 @@ export class AutoResumeController {
 		const waitedMs = pending.delayMs;
 		this.resumesDone++;
 		this.awaitingOutcome = true;
-		this.lastScheduled = { errorText: pending.errorText, hintMs: pending.hint.delayMs };
+		// Only a gateway pause is compared with the next one for the "hint keeps growing" guard;
+		// a plan-window end and a backoff step are not comparable with it.
+		this.lastScheduled = pending.reason === "rate-limit-hint" ? { errorText: pending.errorText, hintMs: pending.hint.delayMs } : { errorText: pending.errorText, hintMs: 0 };
 		this.deps.setStatus(undefined);
 
 		const config = this.deps.config;
