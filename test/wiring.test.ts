@@ -167,3 +167,102 @@ test("/auto-resume language switches the continuation language and persists it",
 	await sleep(200);
 	assert.match(sent.at(-1) ?? "", /waited .*\n.*do not repeat tool calls/s, "persisted across a reload");
 });
+
+// ---- the wall-clock timer: hours and days of waiting ------------------------------------------------------
+
+import { WALL_CLOCK_TICK_MS, wallClockTimer } from "../extensions/auto-resume.ts";
+
+/** A fake clock plus a fake scheduler: time only moves when the test says so. */
+function fakeClock() {
+	let now = 1_000_000;
+	const queue: { at: number; callback: () => void; cancelled: boolean }[] = [];
+	const schedule = (callback: () => void, ms: number) => {
+		const entry = { at: now + ms, callback, cancelled: false };
+		queue.push(entry);
+		return { cancel: () => (entry.cancelled = true) };
+	};
+	/** Advance the wall clock; fire due callbacks in order, as a real event loop would. */
+	const advance = (ms: number, options: { sleep?: boolean } = {}) => {
+		const end = now + ms;
+		if (options.sleep) {
+			// The machine slept: the wall clock jumped, but no timer ran in between.
+			now = end;
+			for (const entry of queue.filter((item) => !item.cancelled && item.at <= now)) {
+				entry.cancelled = true;
+				entry.callback();
+			}
+			return;
+		}
+		for (;;) {
+			const next = queue.filter((item) => !item.cancelled).sort((a, b) => a.at - b.at)[0];
+			if (!next || next.at > end) break;
+			now = next.at;
+			next.cancelled = true;
+			next.callback();
+		}
+		now = end;
+	};
+	return { now: () => now, schedule, advance, pending: () => queue.filter((item) => !item.cancelled).length };
+}
+
+test("wallClockTimer: fires at the wall-clock moment, in short steps", () => {
+	const clock = fakeClock();
+	let fired = 0;
+	wallClockTimer(3 * 60_000, () => fired++, clock.now, clock.schedule);
+	clock.advance(2 * 60_000);
+	assert.equal(fired, 0);
+	clock.advance(60_000 + 1);
+	assert.equal(fired, 1);
+	clock.advance(10 * 60_000);
+	assert.equal(fired, 1, "fires once");
+});
+
+test("wallClockTimer: a wait of days works (no 24.8-day limit) and never schedules a huge timeout", () => {
+	const clock = fakeClock();
+	let fired = 0;
+	const scheduled: number[] = [];
+	const spy = (callback: () => void, ms: number) => {
+		scheduled.push(ms);
+		return clock.schedule(callback, ms);
+	};
+	const fourDays = 4 * 24 * 3600 * 1000;
+	wallClockTimer(fourDays, () => fired++, clock.now, spy);
+	clock.advance(fourDays - 1000);
+	assert.equal(fired, 0);
+	clock.advance(1000 + WALL_CLOCK_TICK_MS);
+	assert.equal(fired, 1);
+	assert.ok(Math.max(...scheduled) <= WALL_CLOCK_TICK_MS, "every real timeout is a short step");
+	const fortyDays = 40 * 24 * 3600 * 1000;
+	const second = fakeClock();
+	let secondFired = 0;
+	wallClockTimer(fortyDays, () => secondFired++, second.now, second.schedule);
+	assert.equal(secondFired, 0, "a 40-day delay does not fire at once, as a plain setTimeout would");
+});
+
+test("wallClockTimer: a laptop that slept wakes up on time, not late by the sleep", () => {
+	const clock = fakeClock();
+	let fired = 0;
+	wallClockTimer(5 * 3600 * 1000, () => fired++, clock.now, clock.schedule);
+	clock.advance(60_000);
+	// The lid is closed for 6 hours: the wall clock jumps past the target while no timer runs.
+	clock.advance(6 * 3600 * 1000, { sleep: true });
+	assert.equal(fired, 1, "the first step after waking sees the target has passed");
+});
+
+test("wallClockTimer: cancel stops it, mid-wait", () => {
+	const clock = fakeClock();
+	let fired = 0;
+	const cancel = wallClockTimer(10 * 60_000, () => fired++, clock.now, clock.schedule);
+	clock.advance(5 * 60_000);
+	cancel();
+	clock.advance(60 * 60_000);
+	assert.equal(fired, 0);
+	assert.equal(clock.pending(), 0, "nothing is left scheduled");
+});
+
+test("wallClockTimer: a delay of zero fires immediately", () => {
+	const clock = fakeClock();
+	let fired = 0;
+	wallClockTimer(0, () => fired++, clock.now, clock.schedule);
+	assert.equal(fired, 1);
+});

@@ -10,6 +10,11 @@ export interface ResetHint {
 	delayMs: number;
 	source: "header" | "text";
 	raw: string;
+	/**
+	 * "retry" is a short pause the gateway asks for between attempts ("reset after 8s"); "window" is
+	 * the moment a plan window (5 hours, a week) really ends. A window time wins when both appear.
+	 */
+	kind: "retry" | "window";
 }
 
 export interface ResetHintInput {
@@ -17,17 +22,66 @@ export interface ResetHintInput {
 	headers?: Record<string, string>;
 	/** Milliseconds since epoch; defaults to Date.now(). */
 	now?: number;
+	/**
+	 * Time zone offset, in hours from UTC, of timestamps written without a zone, such as
+	 * `2026-08-12 17:11:22`. Default 8: Z.ai (GLM) writes Beijing time, which matched every
+	 * error in the author's sessions (a UTC reading was impossible in all of them).
+	 */
+	zonelessOffsetHours?: number;
 }
+
+export const DEFAULT_ZONELESS_OFFSET_HOURS = 8;
+
+/** A time written to the second is read as the end of that second. */
+const WINDOW_ROUNDING_MS = 1000;
 
 const MAX_SANE_DELAY_MS = 90 * 24 * 60 * 60 * 1000; // 90 days, guards against nonsense timestamps
 
 export function parseResetHint(input: ResetHintInput): ResetHint | undefined {
 	const now = input.now ?? Date.now();
+	const message = input.errorMessage ?? "";
+
+	// 1. The moment a plan window ends, written in the message, beats everything: the gateway's own
+	//    "(reset after 2s)" next to it is only its retry pause, not when the limit lifts.
+	const window = parseWindowReset(message, now, input.zonelessOffsetHours ?? DEFAULT_ZONELESS_OFFSET_HOURS);
+	if (window) return window;
 
 	const fromHeader = parseHeaderHint(input.headers ?? {}, now);
 	if (fromHeader) return fromHeader;
 
-	return parseTextHint(input.errorMessage ?? "", now);
+	return parseTextHint(message, now);
+}
+
+/**
+ * `Your limit will reset at 2026-08-12 17:11:22`, `Your limit resets at 2026-09-16T05:07:39.132Z`.
+ * Absolute times only; a bare clock such as "resets 6pm" stays with the text patterns.
+ */
+function parseWindowReset(message: string, now: number, zonelessOffsetHours: number): ResetHint | undefined {
+	if (message.trim().length === 0) return undefined;
+	const match =
+		/\b(?:limit\s+)?(?:will\s+)?resets?\s+(?:at\s+)?(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|[+-]\d{2}:?\d{2}|UTC|GMT)?/i.exec(message);
+	if (!match) return undefined;
+	const [, date, time, zone] = match;
+	if (!date || !time) return undefined;
+	const clock = time.length === 5 ? `${time}:00` : time;
+	let at: number;
+	if (zone === undefined) {
+		const offset = Math.round(zonelessOffsetHours * 60);
+		const sign = offset >= 0 ? "+" : "-";
+		const abs = Math.abs(offset);
+		const zoneText = `${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+		at = Date.parse(`${date}T${clock}${zoneText}`);
+	} else if (/^(utc|gmt)$/i.test(zone)) {
+		at = Date.parse(`${date}T${clock}Z`);
+	} else {
+		at = Date.parse(`${date}T${clock}${zone.length === 5 ? `${zone.slice(0, 3)}:${zone.slice(3)}` : zone}`);
+	}
+	if (!Number.isFinite(at)) return undefined;
+	// The message states whole seconds, so the real end can be up to a second later: round up.
+	const hasFraction = /\.\d+/.test(time);
+	const delayMs = sanitize(at - now + (hasFraction ? 0 : WINDOW_ROUNDING_MS));
+	if (delayMs === undefined) return undefined;
+	return { delayMs, source: "text", raw: match[0].trim(), kind: "window" };
 }
 
 function parseHeaderHint(headers: Record<string, string>, now: number): ResetHint | undefined {
@@ -38,14 +92,14 @@ function parseHeaderHint(headers: Record<string, string>, now: number): ResetHin
 		const ms = Number.parseFloat(retryAfterMs);
 		if (Number.isFinite(ms)) {
 			const delayMs = sanitize(ms);
-			if (delayMs !== undefined) return { delayMs, source: "header", raw: `retry-after-ms: ${retryAfterMs}` };
+			if (delayMs !== undefined) return { delayMs, source: "header", raw: `retry-after-ms: ${retryAfterMs}`, kind: "retry" };
 		}
 	}
 
 	const retryAfter = lookup("retry-after");
 	if (retryAfter !== undefined) {
 		const delayMs = parseRetryAfterValue(retryAfter, now);
-		if (delayMs !== undefined) return { delayMs, source: "header", raw: `retry-after: ${retryAfter}` };
+		if (delayMs !== undefined) return { delayMs, source: "header", raw: `retry-after: ${retryAfter}`, kind: "retry" };
 	}
 
 	const resetAfter = lookup("x-ratelimit-reset-after");
@@ -53,14 +107,14 @@ function parseHeaderHint(headers: Record<string, string>, now: number): ResetHin
 		const seconds = Number.parseFloat(resetAfter);
 		if (Number.isFinite(seconds)) {
 			const delayMs = sanitize(seconds * 1000);
-			if (delayMs !== undefined) return { delayMs, source: "header", raw: `x-ratelimit-reset-after: ${resetAfter}` };
+			if (delayMs !== undefined) return { delayMs, source: "header", raw: `x-ratelimit-reset-after: ${resetAfter}`, kind: "retry" };
 		}
 	}
 
 	const resetAt = lookup("x-ratelimit-reset");
 	if (resetAt !== undefined) {
 		const delayMs = parseAbsoluteValue(resetAt, now);
-		if (delayMs !== undefined) return { delayMs, source: "header", raw: `x-ratelimit-reset: ${resetAt}` };
+		if (delayMs !== undefined) return { delayMs, source: "header", raw: `x-ratelimit-reset: ${resetAt}`, kind: "window" };
 	}
 
 	return undefined;
@@ -142,7 +196,9 @@ const TEXT_PATTERNS: { pattern: RegExp; kind: "duration" | "clock" | "absolute" 
 	{ pattern: /reset(?:s)?\s+in\s+([0-9.,]+\s*(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)[a-z0-9.,\s]*)/i, kind: "duration" },
 	{ pattern: /reset(?:s)?\s+(?:at\s+)?([A-Za-z]{3},?\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{1,2}:\d{2}:\d{2}\s*(?:GMT|UTC)?)/i, kind: "absolute" },
 	{ pattern: /reset(?:s)?\s+(?:at\s+)?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)/i, kind: "absolute" },
-	{ pattern: /reset(?:s)?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i, kind: "clock" },
+	// A bare clock time ("resets 6pm", "resets at 18:00"). Never the start of a date: the lookahead
+	// stops "2099-01-01" from being read as the hour "20".
+	{ pattern: /reset(?:s)?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)(?![\d-])/i, kind: "clock" },
 	{ pattern: /\bretry-after:\s*([0-9]+)/i, kind: "duration" },
 ];
 
@@ -166,7 +222,7 @@ function parseTextHint(errorMessage: string, now: number): ResetHint | undefined
 		}
 
 		const sanitized = delayMs === undefined ? undefined : sanitize(delayMs);
-		if (sanitized !== undefined) return { delayMs: sanitized, source: "text", raw: captured };
+		if (sanitized !== undefined) return { delayMs: sanitized, source: "text", raw: captured, kind: kind === "duration" ? "retry" : "window" };
 	}
 
 	return undefined;
