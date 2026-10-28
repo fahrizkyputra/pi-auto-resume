@@ -81,8 +81,34 @@ ${env}
 `;
 }
 
-function launchctl(args: string[]): void {
-	spawnSync("launchctl", args, { stdio: "ignore" });
+function launchctl(args: string[]): { status: number | null; stderr: string } {
+	const result = spawnSync("launchctl", args, { encoding: "utf8" });
+	return { status: result.status, stderr: (result.stderr ?? "").trim() };
+}
+
+function loaded(): boolean {
+	return launchctl(["print", `${domain()}/${LABEL}`]).status === 0;
+}
+
+function sleepMs(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** `bootout` returns before the job is gone; a `bootstrap` right after it fails. Wait it out. */
+function unload(): void {
+	if (!loaded()) return;
+	launchctl(["bootout", `${domain()}/${LABEL}`]);
+	for (let i = 0; i < 50 && loaded(); i++) sleepMs(200);
+}
+
+function load(): void {
+	unload();
+	let last = launchctl(["bootstrap", domain(), plistPath()]);
+	for (let i = 0; i < 5 && last.status !== 0; i++) {
+		sleepMs(1000);
+		last = launchctl(["bootstrap", domain(), plistPath()]);
+	}
+	if (last.status !== 0 && !loaded()) throw new Error(`launchctl bootstrap failed (${last.status}): ${last.stderr}`);
 }
 
 function domain(): string {
@@ -100,10 +126,7 @@ function install(): string[] {
 	const plist = plistText({ node: process.execPath, daemon: join(here, "daemon.ts"), jcode, log: logPath(), env });
 	mkdirSync(dirname(plistPath()), { recursive: true });
 	writeFileSync(plistPath(), plist);
-	if (launchdEnabled()) {
-		launchctl(["bootout", `${domain()}/${LABEL}`]);
-		launchctl(["bootstrap", domain(), plistPath()]);
-	}
+	if (launchdEnabled()) load();
 	return [
 		`${PACKAGE} installed for jcode`,
 		`- daemon: launchd agent ${LABEL} (starts at login, restarts if it stops)`,
@@ -115,7 +138,7 @@ function install(): string[] {
 }
 
 function uninstall(): string[] {
-	if (launchdEnabled()) launchctl(["bootout", `${domain()}/${LABEL}`]);
+	if (launchdEnabled()) unload();
 	rmSync(plistPath(), { force: true });
 	removeShim(SHIM);
 	rmSync(stateDir(), { recursive: true, force: true });
@@ -138,7 +161,7 @@ function status(): string[] {
 	const lines = [PACKAGE, `enabled: ${config.enabled}`, `language: ${config.language}`];
 	if (existsSync(statusPath())) {
 		const state = JSON.parse(readFileSync(statusPath(), "utf8")) as { pid?: number; sessions?: { session_id: string; title: string; resume_at: number | null }[] };
-		lines.push(`daemon: ${daemonRunning(state.pid) ? `running (pid ${state.pid})` : "not running"}`);
+		lines.push(`daemon: ${daemonRunning(state.pid) ? `running (pid ${state.pid})` : `not running${launchdEnabled() && loaded() ? " (launchd agent loaded; starting or failing, see the log)" : ""}`}`);
 		const now = Date.now();
 		for (const session of state.sessions ?? []) {
 			const wait = session.resume_at ? `resuming ${formatClockWithDay(session.resume_at, now)} (in ${formatCountdown(session.resume_at - now)})` : "watching";
@@ -146,7 +169,8 @@ function status(): string[] {
 		}
 		if ((state.sessions ?? []).length === 0) lines.push("- no jcode session open in a terminal");
 	} else {
-		lines.push(`daemon: not running (${existsSync(plistPath()) ? "launchd agent installed; see the log" : "not installed"})`);
+		const agent = !existsSync(plistPath()) ? "not installed" : launchdEnabled() && !loaded() ? "launchd agent NOT loaded; run install again" : "launchd agent loaded; starting or failing, see the log";
+		lines.push(`daemon: not running (${agent})`);
 	}
 	lines.push(`log: ${logPath()}`, `command: ${shimCommand(SHIM)}`);
 	return lines;
