@@ -100,12 +100,40 @@ Add `"continuationPrompt": "..."` to replace the built-in text with your own. A 
 - Every resume is a normal turn and costs a model call.
 - The continuation is an ordinary user message with the `⚙ auto-resume` marker, so the transcript shows it was not you.
 
+## jcode
+
+The same rules also run for [jcode](https://github.com/1jehuang/jcode), as a small background daemon (macOS launchd agent):
+
+```bash
+npx -y @fahrizkyputra/pi-auto-resume jcode install     # needs Node 22.18+ and jcode on PATH
+```
+
+jcode retries a rate limit by itself (8 quick provider calls, then a few resends from the TUI). For a plan window that is not enough: `Usage limit reached for 5 hour. Your limit will reset at … (reset after 2s)` makes it retry every few seconds and then give up. The daemon picks up from there:
+
+- It runs its own `jcode api-bridge` on a private socket and watches every jcode session open in a terminal.
+- When a turn stops with an error (`turn_stopped`), it applies the same decision as in Pi: a plan window waits for its real end, a rate limit for its hint, a dropped stream backs off 30 s / 1 m / 2 m / 5 m, and money or plan problems are only reported.
+- At the reset it sends the same marked continuation (`⚙ auto-resume …`) into the session, so the agent continues where it stopped.
+- A new turn in that session (you typed, or the TUI's own retry) drops the wait, and that turn decides again. Ctrl-C (an interrupted turn) cancels it.
+- Notices appear as macOS notifications and in the log. A session stays watched until its wait ends, even if the terminal closes.
+
+```
+jcode-auto-resume status          # daemon, watched sessions, pending resumes
+jcode-auto-resume on | off        # master switch (applies within seconds)
+jcode-auto-resume language en|id
+jcode-auto-resume log             # last 40 log lines
+jcode-auto-resume uninstall       # removes the agent, command, and state; keeps the settings
+```
+
+Settings live in `~/.jcode/pi-auto-resume.json` with the same keys as the Pi config (`maxWaitMs`, `maxResumes`, `backoffMs`, `zonelessOffsetHours`, …). The installer copies the code to `~/.jcode/plugins/pi-auto-resume/` and writes `~/Library/LaunchAgents/com.fahrizkyputra.jcode-auto-resume.plist`. Run the install line again to update.
+
 ## Development
 
 ```bash
 npm install
 npm test          # node:test, no Pi required
 npm run typecheck
+npm run test:e2e:jcode   # real jcode + a fake 429 gateway: waits out a plan window, then resumes (~4 min)
+node scripts/e2e-jcode.mjs --broken   # must fail: proves the jcode e2e bites
 npm run test:e2e  # real Pi over RPC against a local server that answers 429, then succeeds
 PI_AUTO_RESUME_LANGUAGE=id npm run test:e2e   # same check in Indonesian
 ```
