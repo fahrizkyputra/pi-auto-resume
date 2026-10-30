@@ -49,6 +49,7 @@ interface Strings {
 	windowNotice(clock: string, countdown: string): string;
 	longWaitNotice(clock: string, countdown: string): string;
 	backoffNotice(clock: string, countdown: string, attempt: number, total: number): string;
+	probeNotice(clock: string, countdown: string, attempt: number): string;
 	resumeNotice(waited: string): string;
 	giveUpNotice(reason: string, resetClock?: string): string;
 	giveUpReason(reason: GiveUpReason): string;
@@ -82,6 +83,8 @@ const STRINGS: Record<Language, Strings> = {
 			`This is a long wait: resuming at ${clock} (in ${countdown}). Keep this Pi session open until then, or type anything to cancel and continue yourself.`,
 		backoffNotice: (clock, countdown, attempt, total) =>
 			`Temporary failure with no reset time: retry ${attempt} of ${total} at ${clock} (in ${countdown}). Type anything to cancel.`,
+		probeNotice: (clock, countdown, attempt) =>
+			`Rate limit, reset time unknown: checking again at ${clock} (in ${countdown})${attempt > 1 ? `, try ${attempt}` : ""}. Keeps checking every 5 minutes until it lifts. Type anything to cancel.`,
 		resumeNotice: (waited) => `Rate limit: continuation sent after waiting ${waited}.`,
 		giveUpNotice: (reason, resetClock) =>
 			`Rate limit: not resuming automatically (${reason}).${
@@ -135,6 +138,8 @@ const STRINGS: Record<Language, Strings> = {
 			`Tunggunya lama: lanjut pukul ${clock} (${countdown} lagi). Biarkan sesi Pi ini tetap terbuka sampai saat itu, atau ketik apa pun untuk membatalkan dan lanjut sendiri.`,
 		backoffNotice: (clock, countdown, attempt, total) =>
 			`Gangguan sementara tanpa info reset: coba ulang ke-${attempt} dari ${total} pukul ${clock} (${countdown} lagi). Ketik apa pun untuk membatalkan.`,
+		probeNotice: (clock, countdown, attempt) =>
+			`Rate limit, jam reset belum diketahui: dicek lagi pukul ${clock} (${countdown} lagi)${attempt > 1 ? `, percobaan ke-${attempt}` : ""}. Terus dicek tiap 5 menit sampai limit lepas. Ketik apa pun untuk membatalkan.`,
 		resumeNotice: (waited) => `Rate limit: pesan lanjutan dikirim setelah menunggu ${waited}.`,
 		giveUpNotice: (reason, resetClock) =>
 			`Rate limit: tidak dilanjutkan otomatis (${reason}).${
@@ -218,7 +223,7 @@ export function formatScheduleNotice(language: Language, fireAt: number, now: nu
 /** Waits longer than this get one extra notice, so a multi-day wait is never a surprise. */
 export const LONG_WAIT_MS = 6 * 60 * 60 * 1000;
 
-export type ScheduleKind = "rate-limit-hint" | "window-reset" | "backoff";
+export type ScheduleKind = "rate-limit-hint" | "window-reset" | "backoff" | "probe";
 
 export function formatScheduleNoticeFor(
 	language: Language,
@@ -231,6 +236,7 @@ export function formatScheduleNoticeFor(
 	const clock = formatClock(fireAt);
 	const countdown = formatCountdown(fireAt - now);
 	if (kind === "backoff" && attempt) return text.backoffNotice(clock, countdown, attempt.number, attempt.total);
+	if (kind === "probe") return text.probeNotice(clock, countdown, attempt?.number ?? 1);
 	if (kind === "window-reset") return text.windowNotice(clock, countdown);
 	return text.scheduleNotice(clock, countdown);
 }

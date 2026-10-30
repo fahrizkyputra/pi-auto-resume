@@ -1,7 +1,7 @@
 {
   "name": "@fahrizkyputra/pi-auto-resume",
-  "version": "0.4.1",
-  "description": "Resume a Pi session automatically after a rate limit: reads the reset hint, waits, then sends a marked continuation. Also waits out 5-hour and weekly plan windows by their real end time, and retries dropped streams and timeless failures on a backoff.",
+  "version": "0.4.2",
+  "description": "Resume a Pi session automatically after a rate limit: waits for the real reset (also for a Claude subscription behind 9router, learned from response headers), then sends a marked continuation. Waits out 5-hour and weekly plan windows and retries dropped streams on a backoff.",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -10,7 +10,9 @@
     "retry",
     "resume",
     "429",
-    "jcode"
+    "jcode",
+    "9router",
+    "claude"
   ],
   "license": "MIT",
   "author": "Fahrizky Putra",
@@ -42,7 +44,7 @@
   "scripts": {
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "node scripts/e2e-rpc.mjs && node scripts/e2e-window.mjs",
+    "test:e2e": "node scripts/e2e-rpc.mjs && node scripts/e2e-window.mjs && node scripts/e2e-9router.mjs",
     "test:e2e:jcode": "node scripts/e2e-jcode.mjs"
   },
   "peerDependencies": {

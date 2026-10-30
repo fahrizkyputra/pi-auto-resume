@@ -19,6 +19,7 @@ import {
 	formatScheduleNoticeFor,
 	statusText,
 } from "./messages.ts";
+import { type KnownReset, readUnifiedReset } from "./known-reset.ts";
 import type { ResetHint } from "./reset-hint.ts";
 
 export interface AutoResumeDeps {
@@ -55,20 +56,38 @@ export class AutoResumeController {
 	private lastHeaders: Record<string, string> | undefined;
 	/** Retries in a row of errors that carry no time; a clean run resets it. */
 	private backoffAttempts = 0;
+	/** The plan window's reset, from Anthropic's unified rate-limit headers on any response. */
+	private known: KnownReset | undefined;
+	private probeAttempts = 0;
 
 	constructor(deps: AutoResumeDeps) {
 		this.deps = deps;
 	}
 
-	/** Response metadata from the provider layer, used for `retry-after`. */
-	onProviderResponse(headers: Record<string, string> | undefined): void {
-		this.lastHeaders = headers;
+	/**
+	 * Response metadata from the provider layer. Pi passes headers of successful responses only, so
+	 * `retry-after` here belongs to a success; the useful part is Anthropic's unified rate-limit
+	 * reset, remembered for when the limit comes.
+	 */
+	onProviderResponse(headers: Record<string, string> | undefined, status?: number): void {
+		const learned = readUnifiedReset(headers, this.deps.now());
+		if (learned) this.known = learned;
+		// Only an error response's headers describe the error; a success's retry-after would mislead.
+		this.lastHeaders = status !== undefined && status >= 400 ? headers : undefined;
+	}
+
+	/** The reset learned so far, while it is still ahead. */
+	knownReset(): KnownReset | undefined {
+		if (this.known && this.known.resetAt <= this.deps.now()) this.known = undefined;
+		return this.known;
 	}
 
 	/** The provider response that followed: clear the header hint again. */
 	noteNoError(): void {
 		this.awaitingOutcome = false;
 		this.backoffAttempts = 0;
+		this.probeAttempts = 0;
+		this.knownReset();
 	}
 
 	/** Called when the agent stopped and nothing else will continue it. */
@@ -84,6 +103,8 @@ export class AutoResumeController {
 			awaitingOutcome: this.awaitingOutcome,
 			resumesDone: this.resumesDone,
 			backoffAttempts: this.backoffAttempts,
+			probeAttempts: this.probeAttempts,
+			...(this.knownReset() === undefined ? {} : { knownReset: this.known }),
 		});
 
 		if (decision.action === "ignore") return decision;
@@ -104,6 +125,7 @@ export class AutoResumeController {
 		this.cancelPending();
 		if (decision.reason === "backoff") this.backoffAttempts = decision.attempt ?? this.backoffAttempts + 1;
 		else this.backoffAttempts = 0;
+		this.probeAttempts = decision.reason === "probe" ? (decision.attempt ?? this.probeAttempts + 1) : 0;
 		this.schedule(decision.delayMs, decision.hint, input.errorMessage ?? "", now, decision.reason, decision.attempt, decision.attempts);
 		return decision;
 	}

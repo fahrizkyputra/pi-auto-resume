@@ -82,7 +82,7 @@ export default function autoResumeExtension(pi: ExtensionAPI) {
 
 	pi.on("after_provider_response", (event, ctx) => {
 		void ctx;
-		controller?.onProviderResponse(event.headers);
+		controller?.onProviderResponse(event.headers, event.status);
 	});
 
 	pi.on("message_end", (event, ctx) => {

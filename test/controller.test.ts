@@ -247,3 +247,93 @@ test("money problems are still only reported", () => {
 	assert.match(notices.at(-1)?.message ?? "", /plan\/quota limit/);
 	assert.deepEqual(sent, []);
 });
+
+// ---- Claude subscription behind 9router: the real reset comes from successful responses -------------
+
+const NINE = (s: string) =>
+	`503: {"message":"[claude/claude-opus-5-5] [429]: {\\"type\\":\\"error\\",\\"error\\":{\\"type\\":\\"rate_limit_error\\",\\"message\\":\\"This request would exceed your account's rate limit. Please try again later.\\"},\\"request_id\\":\\"req_X\\"} (reset after ${s})"}`;
+
+test("REGRESSION 27 Oct: 9router's growing lock (16s, 18s, 58s) never makes it give up", () => {
+	const { controller, advance, sent, notices } = createHarness();
+	for (const seconds of ["16s", "18s", "58s", "1m 4s", "2m 8s", "5m"]) {
+		const decision = controller.onAgentSettled({ errorMessage: NINE(seconds) });
+		assert.equal(decision.action, "schedule", `after (reset after ${seconds})`);
+		advance(10 * 60_000);
+	}
+	assert.ok(sent.length >= 6);
+	assert.ok(!notices.some((notice) => /getting longer|makin jauh/.test(notice.message)), "no 'growing hint' give-up");
+});
+
+test("a reset learned from a successful response is used when the limit comes", () => {
+	const { controller, advance, sent, notices } = createHarness();
+	const now = Date.parse("2026-03-11T10:00:00.000Z");
+	// Earlier, a successful response: the 5-hour window resets in 2 hours.
+	controller.onProviderResponse(
+		{
+			"anthropic-ratelimit-unified-representative-claim": "five_hour",
+			"anthropic-ratelimit-unified-reset": String(now / 1000 + 2 * 3600),
+			"anthropic-ratelimit-unified-status": "allowed",
+		},
+		200,
+	);
+	controller.noteNoError();
+	const decision = controller.onAgentSettled({ errorMessage: NINE("9s") });
+	assert.equal(decision.action, "schedule");
+	if (decision.action === "schedule") {
+		assert.equal(decision.reason, "window-reset");
+		assert.equal(decision.delayMs, 2 * 3600 * 1000, "the window's real reset, not 9 seconds");
+	}
+	assert.match(notices.at(-1)?.message ?? notices.at(-2)?.message ?? "", /plan window ends/);
+	advance(9_000 + 1000);
+	assert.deepEqual(sent, [], "not after 9 seconds");
+	advance(2 * 3600 * 1000);
+	assert.equal(sent.length, 1);
+});
+
+test("a learned reset that already passed is not reused; it probes instead", () => {
+	const { controller, advance } = createHarness();
+	const now = Date.parse("2026-03-11T10:00:00.000Z");
+	controller.onProviderResponse({ "anthropic-ratelimit-unified-reset": String(now / 1000 + 60) }, 200);
+	// Two hours go by without another response: the stored reset is in the past now.
+	advance(2 * 3600 * 1000);
+	const decision = controller.onAgentSettled({ errorMessage: NINE("9s") });
+	assert.equal(decision.action, "schedule");
+	if (decision.action === "schedule") assert.equal(decision.reason, "probe");
+});
+
+test("with no known reset, a Claude limit probes every 5 minutes, without a retry cap", () => {
+	const { controller, advance, sent } = createHarness();
+	const waits: number[] = [];
+	// 9router's lock doubles 2 s, 4 s … and stops at 5 minutes; past that it repeats "5m".
+	const lock = (probe: number) => (2 ** (probe + 1) >= 300 ? "5m" : `${2 ** (probe + 1)}s`);
+	for (let probe = 0; probe < 12; probe++) {
+		const decision = controller.onAgentSettled({ errorMessage: NINE(lock(probe)) });
+		assert.equal(decision.action, "schedule", `probe ${probe + 1}`);
+		if (decision.action === "schedule") waits.push(decision.delayMs);
+		advance(decision.action === "schedule" ? decision.delayMs + 2000 : 0);
+	}
+	assert.equal(sent.length, 12, "an hour of probing, never reported");
+	assert.ok(waits.every((ms) => ms <= 5 * 60_000), "each wait at most 5 minutes");
+	assert.ok(waits.slice(-3).every((ms) => ms === 5 * 60_000), "settles on one probe per 5 minutes");
+});
+
+test("a learned reset ends the probing: once known, it waits for that time", () => {
+	const { controller, advance } = createHarness();
+	const now = Date.parse("2026-03-11T10:00:00.000Z");
+	controller.onAgentSettled({ errorMessage: NINE("9s") });
+	advance(60_000);
+	// Some response (a gateway that adds the headers to its error, or any success) carries the reset.
+	controller.onProviderResponse({ "anthropic-ratelimit-unified-reset": String(now / 1000 + 3 * 3600) }, 503);
+	const decision = controller.onAgentSettled({ errorMessage: NINE("16s") });
+	assert.equal(decision.action, "schedule");
+	if (decision.action === "schedule") assert.equal(decision.reason, "window-reset");
+});
+
+test("a clean answer after the window forgets the old reset", () => {
+	const { controller, advance } = createHarness();
+	const now = Date.parse("2026-03-11T10:00:00.000Z");
+	controller.onProviderResponse({ "anthropic-ratelimit-unified-reset": String(now / 1000 + 600) }, 200);
+	advance(700_000);
+	controller.noteNoError();
+	assert.equal(controller.knownReset(), undefined);
+});

@@ -28,6 +28,7 @@ pi install npm:@fahrizkyputra/pi-auto-resume
 
 | Situation | What happens |
 |---|---|
+| **Claude subscription through 9router**: `503: {"message":"[claude/claude-opus-5-5] [429]: … rate_limit_error … (reset after 9s)"}` | Waits for the plan window's real reset, learned from earlier successful answers. If it is not known yet, checks again every few minutes (never more than 5) until the limit lifts, without giving up |
 | Rate limit (429, `rate_limit_error`, "too many requests", "overloaded") **with** a reset hint, after Pi's own retries gave up | Waits for the reset (+1.5s slack), then sends the continuation |
 | **Plan window** (5-hour or weekly): `Usage limit reached for 5 hour. Your limit will reset at 2026-08-12 17:11:22` | Waits until that real end, however long, then continues. A wait over 6 hours gets one extra notice with the day and time |
 | Failure **with no time at all**: a rate limit that says nothing about when, or a network/stream failure (`Stream ended without finish_reason`, `terminated`, `Connection error`, `fetch failed`, `upstream connection lost`) | Retries on a growing pause, 30s, 1m, 2m, 5m, then stops and reports |
@@ -36,6 +37,14 @@ pi install npm:@fahrizkyputra/pi-auto-resume
 | The next reset hint is much further away (8s → 20m → 3h) | Stops and reports: the limit is getting worse |
 | You type anything, press Esc, or switch session | The scheduled resume is cancelled |
 | Pi is closed while waiting | The schedule is gone (nothing persists) |
+
+### Claude subscriptions behind 9router
+
+The `(reset after 9s)` in a 9router error is **not** when the limit lifts. It is 9router's own lock on the account, which doubles while the account stays limited (2 s, 4 s, 8 s … up to 5 minutes). Version 0.3.0 read that growth as "the limit is getting worse" and gave up after two resumes.
+
+The real reset is in Anthropic's `anthropic-ratelimit-unified-reset` header, which 9router forwards. Pi does not hand a failed request's headers to extensions, but every **successful** answer carries them too, so the package remembers the reset of the window that is filling up (`representative-claim`: `five_hour` or `seven_day`) and uses it when the limit comes. One continuation is sent at that moment, with the usual slack.
+
+When the reset is not known (a new session that hits the limit on its first request), it follows 9router's lock while that is short, then checks once every 5 minutes, without a retry limit, like 9router itself. Typing anything or pressing Esc stops it. `maxWaitMs` and `maxResumes` still apply when set.
 
 ### Which time wins
 

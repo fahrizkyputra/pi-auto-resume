@@ -17,6 +17,10 @@ import { type ResetHint, parseResetHint } from "./reset-hint.ts";
 export type ErrorKind = "rate-limit" | "quota" | "transient" | "other";
 
 import { DEFAULT_BACKOFF_MS } from "./config.ts";
+import { type KnownReset, isClaudeGatewayLimit } from "./known-reset.ts";
+
+/** Between probes of a limit whose reset is unknown: the same ceiling 9router's own lock uses. */
+export const PROBE_INTERVAL_MS = 5 * 60_000;
 
 /** The default pauses between retries of an error that carries no time. Configurable as `backoffMs`. */
 export const BACKOFF_MS: readonly number[] = DEFAULT_BACKOFF_MS;
@@ -132,9 +136,13 @@ export interface DecisionInput {
 	resumesDone: number;
 	/** Retries in a row of errors that carry no time; reset by a run that ends cleanly. */
 	backoffAttempts?: number;
+	/** The plan window's reset, learned from response headers (see known-reset.ts). */
+	knownReset?: KnownReset;
+	/** Probes in a row of a Claude subscription limit with no known reset. */
+	probeAttempts?: number;
 }
 
-export type ScheduleReason = "rate-limit-hint" | "window-reset" | "backoff";
+export type ScheduleReason = "rate-limit-hint" | "window-reset" | "backoff" | "probe";
 
 export type Decision =
 	| { action: "schedule"; delayMs: number; hint: ResetHint; reason: ScheduleReason; attempt?: number; attempts?: number }
@@ -163,6 +171,34 @@ export function decideResume(input: DecisionInput): Decision {
 	}
 
 	if (kind === "other") return { action: "ignore", reason: "not a rate-limit error" };
+
+	// A Claude subscription behind 9router. Its "(reset after Ns)" is 9router's own lock, which grows
+	// 2 s, 4 s, 8 s … up to 5 minutes while the account stays limited: it is neither the reset nor a
+	// sign of a worse limit. The real reset travels in response headers, learned from successful
+	// responses. Use it when it is still ahead; otherwise probe every few minutes until it lifts.
+	if (kind === "rate-limit" && !window && isClaudeGatewayLimit(message)) {
+		const known = input.knownReset;
+		if (known && known.resetAt > input.now) {
+			const delayMs = known.resetAt - input.now;
+			if (input.config.maxWaitMs > 0 && delayMs > input.config.maxWaitMs) {
+				return { action: "report", reason: { code: "max-wait" }, hint: { delayMs, source: "header", raw: "anthropic-ratelimit-unified-reset", kind: "window" } };
+			}
+			return {
+				action: "schedule",
+				delayMs,
+				hint: { delayMs, source: "header", raw: `anthropic-ratelimit-unified-reset (${known.window})`, kind: "window" },
+				reason: "window-reset",
+			};
+		}
+		if (input.config.maxResumes > 0 && input.resumesDone >= input.config.maxResumes) {
+			return { action: "report", reason: { code: "max-resumes", count: input.resumesDone } };
+		}
+		// Unknown reset: follow 9router's own pause while it is short, then one probe per PROBE_INTERVAL_MS.
+		const lock = hint?.delayMs ?? PROBE_INTERVAL_MS;
+		const delayMs = Math.min(Math.max(lock, 1000), PROBE_INTERVAL_MS);
+		const probe: ResetHint = { delayMs, source: "text", raw: hint?.raw ?? "no reset known", kind: "retry" };
+		return { action: "schedule", delayMs, hint: probe, reason: "probe", attempt: (input.probeAttempts ?? 0) + 1 };
+	}
 
 	const previous = input.lastScheduled;
 	// A resume that fails the same way at once is a loop. It does not apply to a transient failure
